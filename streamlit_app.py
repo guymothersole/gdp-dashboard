@@ -3,149 +3,138 @@ import pandas as pd
 import math
 from pathlib import Path
 
-# Set the title and favicon that appear in the Browser's tab bar.
 st.set_page_config(
-    page_title='GDP dashboard',
-    page_icon=':earth_americas:', # This is an emoji shortcode. Could be a URL too.
+    page_title='AW GPS dashboard',
+    page_icon=':soccer:',
 )
-
-# -----------------------------------------------------------------------------
-# Declare some useful functions.
 
 @st.cache_data
-def get_gdp_data():
-    """Grab GDP data from a CSV file.
+def load_data():
+    DATA_FILENAME = Path(__file__).parent / 'data' / 'AW_GPS_Data.csv'
+    df = pd.read_csv(DATA_FILENAME)
 
-    This uses caching to avoid having to read the file every time. If we were
-    reading from an HTTP endpoint instead of a file, it's a good idea to set
-    a maximum age to the cache with the TTL argument: @st.cache_data(ttl='1d')
-    """
+    # Clean column names (remove leading/trailing spaces)
+    df.columns = df.columns.str.strip()
 
-    # Instead of a CSV on disk, you could read from an HTTP endpoint here too.
-    DATA_FILENAME = Path(__file__).parent/'data/gdp_data.csv'
-    raw_gdp_df = pd.read_csv(DATA_FILENAME)
+    # Parse DATE column (samples look like DD/MM/YYYY)
+    if 'DATE' in df.columns:
+        df['DATE'] = pd.to_datetime(df['DATE'], dayfirst=True, errors='coerce')
 
-    MIN_YEAR = 1960
-    MAX_YEAR = 2022
+    # Ensure numeric columns are numeric
+    numeric_cols = [
+        'TOTAL D (m)',
+        'HSR D (m) 19.8 - 25.2 kmh',
+        'SPRINT D (m) 25.2+ kmh',
+        'TOP SPEED (kmh)',
+        'ACCEL COUNT 2+ m/s',
+        'DECEL COUNT 2+ m/s',
+    ]
 
-    # The data above has columns like:
-    # - Country Name
-    # - Country Code
-    # - [Stuff I don't care about]
-    # - GDP for 1960
-    # - GDP for 1961
-    # - GDP for 1962
-    # - ...
-    # - GDP for 2022
-    #
-    # ...but I want this instead:
-    # - Country Name
-    # - Country Code
-    # - Year
-    # - GDP
-    #
-    # So let's pivot all those year-columns into two: Year and GDP
-    gdp_df = raw_gdp_df.melt(
-        ['Country Code'],
-        [str(x) for x in range(MIN_YEAR, MAX_YEAR + 1)],
-        'Year',
-        'GDP',
-    )
+    for c in numeric_cols:
+        if c in df.columns:
+            df[c] = pd.to_numeric(df[c], errors='coerce')
 
-    # Convert years from string to integers
-    gdp_df['Year'] = pd.to_numeric(gdp_df['Year'])
+    # Also normalize string columns
+    for c in ['OPPOSITION', 'NAME', 'Unit Position']:
+        if c in df.columns:
+            df[c] = df[c].astype(str).str.strip()
 
-    return gdp_df
+    return df
 
-gdp_df = get_gdp_data()
 
-# -----------------------------------------------------------------------------
-# Draw the actual page
+df = load_data()
 
-# Set the title that appears at the top of the page.
-'''
-# :earth_americas: GDP dashboard
+st.title('AW GPS interactive dashboard')
+st.markdown('Filter the dataset by Opposition, Name and Unit Position; then explore the GPS metrics.')
 
-Browse GDP data from the [World Bank Open Data](https://data.worldbank.org/) website. As you'll
-notice, the data only goes to 2022 right now, and datapoints for certain years are often missing.
-But it's otherwise a great (and did I mention _free_?) source of data.
-'''
+# Guard for missing dataset
+if df is None or df.shape[0] == 0:
+    st.warning('No data loaded from data/AW_GPS_Data.csv')
+    st.stop()
 
-# Add some spacing
-''
-''
+# Sidebar filters
+st.sidebar.header('Filters')
 
-min_value = gdp_df['Year'].min()
-max_value = gdp_df['Year'].max()
+oppositions = sorted(df['OPPOSITION'].dropna().unique()) if 'OPPOSITION' in df.columns else []
+selected_opposition = st.sidebar.multiselect('Opposition', oppositions, default=oppositions)
 
-from_year, to_year = st.slider(
-    'Which years are you interested in?',
-    min_value=min_value,
-    max_value=max_value,
-    value=[min_value, max_value])
+# Filter names based on opposition selection
+if 'NAME' in df.columns:
+    names = df[df['OPPOSITION'].isin(selected_opposition)]['NAME'].dropna().unique() if selected_opposition else df['NAME'].dropna().unique()
+    names = sorted(names)
+else:
+    names = []
+selected_names = st.sidebar.multiselect('Name', names, default=list(names)[:5])
 
-countries = gdp_df['Country Code'].unique()
+unit_positions = sorted(df['Unit Position'].dropna().unique()) if 'Unit Position' in df.columns else []
+selected_units = st.sidebar.multiselect('Unit Position', unit_positions, default=unit_positions)
 
-if not len(countries):
-    st.warning("Select at least one country")
+# Filter dataframe
+filtered = df.copy()
+if selected_opposition:
+    filtered = filtered[filtered['OPPOSITION'].isin(selected_opposition)]
+if selected_names:
+    filtered = filtered[filtered['NAME'].isin(selected_names)]
+if selected_units:
+    filtered = filtered[filtered['Unit Position'].isin(selected_units)]
 
-selected_countries = st.multiselect(
-    'Which countries would you like to view?',
-    countries,
-    ['DEU', 'FRA', 'GBR', 'BRA', 'MEX', 'JPN'])
+if filtered.empty:
+    st.warning('No rows match your filter selection.')
+    st.stop()
 
-''
-''
-''
-
-# Filter the data
-filtered_gdp_df = gdp_df[
-    (gdp_df['Country Code'].isin(selected_countries))
-    & (gdp_df['Year'] <= to_year)
-    & (from_year <= gdp_df['Year'])
+# Metrics to show
+metrics = [
+    'TOTAL D (m)',
+    'HSR D (m) 19.8 - 25.2 kmh',
+    'SPRINT D (m) 25.2+ kmh',
+    'TOP SPEED (kmh)',
+    'ACCEL COUNT 2+ m/s',
+    'DECEL COUNT 2+ m/s',
 ]
+available_metrics = [m for m in metrics if m in filtered.columns]
+selected_metrics = st.sidebar.multiselect('Metrics to plot', available_metrics, default=available_metrics[:3])
 
-st.header('GDP over time', divider='gray')
+plot_mode = st.sidebar.selectbox('Plot mode', ['Time series (by DATE)', 'Per-player aggregate (bar)'])
 
-''
+st.header('Filtered data')
+st.dataframe(filtered.head(200))
 
-st.line_chart(
-    filtered_gdp_df,
-    x='Year',
-    y='GDP',
-    color='Country Code',
-)
+if not selected_metrics:
+    st.info('Choose one or more metrics to plot from the sidebar.')
+    st.stop()
 
-''
-''
+# Plotting
+if plot_mode == 'Time series (by DATE)':
+    if 'DATE' not in filtered.columns:
+        st.error('DATE column not found; cannot create time series.')
+    else:
+        # For each metric, create a line chart across time. Color by NAME if multiple names selected.
+        # We'll pivot so each NAME becomes a column (for a given metric)
+        for metric in selected_metrics:
+            st.subheader(metric)
+            chart_df = filtered[['DATE', 'NAME', metric]].dropna()
+            if chart_df.empty:
+                st.write('No data for this metric after filtering.')
+                continue
 
+            if len(chart_df['NAME'].unique()) <= 1:
+                # single player or unspecified: aggregate by DATE
+                series = chart_df.groupby('DATE')[metric].sum().sort_index()
+                st.line_chart(series)
+            else:
+                pivot = chart_df.pivot_table(index='DATE', columns='NAME', values=metric, aggfunc='sum')
+                st.line_chart(pivot.sort_index())
 
-first_year = gdp_df[gdp_df['Year'] == from_year]
-last_year = gdp_df[gdp_df['Year'] == to_year]
+else:
+    st.subheader('Per-player aggregate')
+    # Aggregate selected metrics per player (sum) and show as bar charts
+    agg = filtered.groupby('NAME')[selected_metrics].sum().sort_values(by=selected_metrics[0], ascending=False)
+    st.dataframe(agg)
 
-st.header(f'GDP in {to_year}', divider='gray')
+    # For each metric show a bar chart
+    for metric in selected_metrics:
+        st.markdown(f'**{metric}**')
+        st.bar_chart(agg[metric])
 
-''
-
-cols = st.columns(4)
-
-for i, country in enumerate(selected_countries):
-    col = cols[i % len(cols)]
-
-    with col:
-        first_gdp = first_year[first_year['Country Code'] == country]['GDP'].iat[0] / 1000000000
-        last_gdp = last_year[last_year['Country Code'] == country]['GDP'].iat[0] / 1000000000
-
-        if math.isnan(first_gdp):
-            growth = 'n/a'
-            delta_color = 'off'
-        else:
-            growth = f'{last_gdp / first_gdp:,.2f}x'
-            delta_color = 'normal'
-
-        st.metric(
-            label=f'{country} GDP',
-            value=f'{last_gdp:,.0f}B',
-            delta=growth,
-            delta_color=delta_color
-        )
+st.sidebar.markdown('---')
+st.sidebar.markdown('Tip: use the filters to narrow the data and switch plot mode to inspect per-player totals or time trends.')
